@@ -15,6 +15,27 @@ import {
 import { useNavigate } from "react-router-dom";
 import { loadCompanyProfile, saveCompanyProfile } from "../utils/companyProfile";
 
+/* ── Defined OUTSIDE the component so React never treats it as a new type on re-render ── */
+const InputWrapper = ({ label, icon: Icon, error, children }) => (
+  <div>
+    <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
+      {label}
+    </label>
+    <div className="relative">
+      <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
+        <Icon size={17} />
+      </div>
+      {children}
+    </div>
+    {error && <p className="mt-1 text-xs text-red-500">{error}</p>}
+  </div>
+);
+
+const inputClass = (errors, key) =>
+  `w-full pl-10 pr-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent
+   bg-white dark:bg-slate-700 text-slate-900 dark:text-white transition-colors
+   ${errors[key] ? "border-red-400 dark:border-red-500" : "border-slate-300 dark:border-slate-600"}`;
+
 const INITIAL_STATE = {
   companyName: "",
   companyTagline: "",
@@ -121,7 +142,6 @@ export default function RegisterCompany() {
     } else if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) {
       newErrors.email = "Enter a valid email address.";
     }
-    // password validation (min length and match)
     if (!form.password || String(form.password).length < 6) {
       newErrors.password = "Password must be at least 6 characters.";
     }
@@ -145,27 +165,6 @@ export default function RegisterCompany() {
       navigate(isLoggedIn ? "/settings" : "/login");
     }, 1400);
   };
-
-  /* ── UI helpers ── */
-  const InputWrapper = ({ label, icon: Icon, error, children }) => (
-    <div>
-      <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
-        {label}
-      </label>
-      <div className="relative">
-        <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none">
-          <Icon size={17} />
-        </div>
-        {children}
-      </div>
-      {error && <p className="mt-1 text-xs text-red-500">{error}</p>}
-    </div>
-  );
-
-  const inputClass = (key) =>
-    `w-full pl-10 pr-4 py-3 border rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent
-     bg-white dark:bg-slate-700 text-slate-900 dark:text-white transition-colors
-     ${errors[key] ? "border-red-400 dark:border-red-500" : "border-slate-300 dark:border-slate-600"}`;
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 to-slate-100 dark:from-slate-900 dark:to-slate-800 p-6">
@@ -267,24 +266,25 @@ export default function RegisterCompany() {
               icon={Building2}
               error={errors.companyName}
             >
-              <textarea
-                rows={1}
+              <input
+                type="text"
                 placeholder="e.g. Constructify Pvt. Ltd."
                 autoComplete="organization"
-                className={`${inputClass("companyName")} resize-none`}
+                className={inputClass(errors, "companyName")}
                 {...field("companyName")}
               />
             </InputWrapper>
 
+            {/* Company Tagline */}
             <InputWrapper
               label="Company Tagline"
               icon={Building2}
               error={errors.companyTagline}
             >
-              <textarea
-                rows={1}
-                placeholder="Wholesale and Distibution"
-                className={`${inputClass("companyTagline")} resize-none`}
+              <input
+                type="text"
+                placeholder="Wholesale and Distribution"
+                className={inputClass(errors, "companyTagline")}
                 {...field("companyTagline")}
               />
             </InputWrapper>
@@ -295,24 +295,25 @@ export default function RegisterCompany() {
               icon={User}
               error={errors.ownerName}
             >
-              <textarea
-                rows={1}
+              <input
+                type="text"
                 placeholder="e.g. Rajesh Sharma"
                 autoComplete="name"
-                className={`${inputClass("ownerName")} resize-none`}
+                className={inputClass(errors, "ownerName")}
                 {...field("ownerName")}
               />
             </InputWrapper>
 
+            {/* GST IN */}
             <InputWrapper
               label="GST IN"
               icon={Building2}
               error={errors.gstIn}
             >
-              <textarea
-                rows={1}
+              <input
+                type="text"
                 placeholder="e.g. 22AAAAA0000A1Z5"
-                className={`${inputClass("gstIn")} resize-none`}
+                className={inputClass(errors, "gstIn")}
                 value={form.gstIn}
                 onChange={(e) => {
                   const nextValue = e.target.value.toUpperCase();
@@ -323,7 +324,7 @@ export default function RegisterCompany() {
               />
             </InputWrapper>
 
-            {/* Address */}
+            {/* Address — kept as textarea since it's genuinely multi-line */}
             <div>
               <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
                 Address
@@ -359,11 +360,11 @@ export default function RegisterCompany() {
                 icon={Phone}
                 error={errors.phone}
               >
-                <textarea
-                  rows={1}
+                <input
+                  type="tel"
                   placeholder="+91 9876543210"
                   autoComplete="tel"
-                  className={`${inputClass("phone")} resize-none`}
+                  className={inputClass(errors, "phone")}
                   {...field("phone")}
                 />
               </InputWrapper>
@@ -373,35 +374,34 @@ export default function RegisterCompany() {
                 icon={Mail}
                 error={errors.email}
               >
-                <textarea
-                  rows={1}
+                <input
+                  type="email"
                   placeholder="company@example.com"
                   autoComplete="email"
-                  className={`${inputClass("email")} resize-none`}
+                  className={inputClass(errors, "email")}
                   {...field("email")}
                 />
               </InputWrapper>
             </div>
 
+            {/* Password fields */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
               <InputWrapper label="Password" icon={Lock} error={errors.password}>
-                <textarea
-                  rows={1}
+                <input
+                  type="password"
                   placeholder="Choose a password (min 6 chars)"
                   autoComplete="new-password"
-                  className={`${inputClass("password")} resize-none`}
-                  style={{ WebkitTextSecurity: "disc" }}
+                  className={inputClass(errors, "password")}
                   {...field("password")}
                 />
               </InputWrapper>
 
               <InputWrapper label="Confirm Password" icon={Lock} error={errors.confirmPassword}>
-                <textarea
-                  rows={1}
+                <input
+                  type="password"
                   placeholder="Re-enter password"
                   autoComplete="new-password"
-                  className={`${inputClass("confirmPassword")} resize-none`}
-                  style={{ WebkitTextSecurity: "disc" }}
+                  className={inputClass(errors, "confirmPassword")}
                   {...field("confirmPassword")}
                 />
               </InputWrapper>
