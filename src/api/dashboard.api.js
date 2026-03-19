@@ -15,3 +15,6 @@ export async function getDashboardAnalytics() {
 		},
 	};
 }
+
+// Provide a default export for environments or imports that expect it
+export default getDashboardAnalytics;
