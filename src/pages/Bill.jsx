@@ -4,6 +4,7 @@ import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 // import logoImage from "../assets/logo.png";
 import { motion, AnimatePresence } from "framer-motion";
+import { useLocation, useNavigate } from "react-router-dom";
 import {
   Plus,
   Download,
@@ -16,6 +17,7 @@ import {
   TrendingUp,
   Clock,
   CheckCircle,
+  AlertTriangle,
 } from "lucide-react";
 import axios from "../utils/axiosConfig";
 import { loadCompanyProfile } from "../utils/companyProfile";
@@ -169,11 +171,14 @@ function StatCard({ icon: Icon, label, value, color }) {
 
 // ── Main Component ─────────────────────────────────────────────
 export default function InvoiceGenerator() {
+  const location = useLocation();
+  const navigate = useNavigate();
   const [invoices, setInvoices] = useState([]);
   const [materials, setMaterials] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [form, setForm] = useState({
     id: null,
+    sourceOrderId: "",
     client: "",
     status: "pending",
     materials: [{ name: "", quantity: 1, rate: 0 }],
@@ -183,6 +188,8 @@ export default function InvoiceGenerator() {
   const [showForm, setShowForm] = useState(false);
   const [generatingPDF, setGeneratingPDF] = useState(null);
   const [isSendingEmail, setIsSendingEmail] = useState(null);
+  const [showCriticalPopup, setShowCriticalPopup] = useState(false);
+  const [criticalPopupItems, setCriticalPopupItems] = useState([]);
 
   const API_URL = import.meta.env.VITE_API_URL || "";
 
@@ -281,6 +288,47 @@ export default function InvoiceGenerator() {
   useEffect(() => {
     fetchMaterials();
   }, []);
+
+  // One-time prefill when coming from Customers Orders -> Create Invoice
+  useEffect(() => {
+    const fromState = location?.state?.invoicePrefill;
+    const fromStorageRaw = localStorage.getItem("invoicePrefillFromOrder");
+    const fromStorage = fromStorageRaw ? JSON.parse(fromStorageRaw) : null;
+    const prefill = fromState || fromStorage;
+
+    if (!prefill || !showForm) {
+      if (!prefill) return;
+    }
+
+    if (!prefill || customers.length === 0 || materials.length === 0) return;
+
+    const selectedCustomer =
+      customers.find((c) => String(c._id) === String(prefill.customerId)) ||
+      customers.find((c) => String(c.name || "").toLowerCase() === String(prefill.client || "").toLowerCase());
+
+    const selectedMaterial =
+      materials.find((m) => String(m.name || "").toLowerCase() === String(prefill.materialName || "").toLowerCase());
+
+    setForm((prev) => ({
+      ...prev,
+      id: null,
+      sourceOrderId: prefill.sourceOrderId || "",
+      customerId: selectedCustomer?._id || "",
+      client: selectedCustomer?.name || prefill.client || "",
+      status: prefill.status || "pending",
+      materials: [
+        {
+          name: selectedMaterial?.name || prefill.materialName || "",
+          quantity: Number(prefill.quantity || 1),
+          rate: prefill.rate ?? "",
+        },
+      ],
+    }));
+    setShowForm(true);
+
+    localStorage.removeItem("invoicePrefillFromOrder");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location?.state, customers, materials]);
 
   // If materials load after invoices, re-normalize invoice material names
   useEffect(() => {
@@ -397,14 +445,12 @@ const fetchInvoices = async () => {
             (m) => m.name.toLowerCase() === material.name.toLowerCase(),
           );
           if (inventoryMaterial) {
+            const nextQty = Math.max(0, inventoryMaterial.quantity - material.quantity);
             await axios.put(
               `/api/materials/${inventoryMaterial._id}`,
               {
                 ...inventoryMaterial,
-                quantity: Math.max(
-                  0,
-                  inventoryMaterial.quantity - material.quantity,
-                ),
+                quantity: nextQty,
                 lastUpdated: new Date().toISOString().split("T")[0],
               },
             );
@@ -424,17 +470,49 @@ const fetchInvoices = async () => {
       date: new Date().toISOString(),
     };
     try {
+      let res;
       if (form.id) {
-        const res = await axios.put(
+        res = await axios.put(
           `/api/invoices/${form.id}`,
           invoiceData,
         );
         const normalized = normalizeInvoice(res.data);
         setInvoices((prev) => prev.map((inv) => (inv._id === form.id ? normalized : inv)));
       } else {
-        const res = await axios.post('/api/invoices', invoiceData);
+        res = await axios.post('/api/invoices', invoiceData);
         const normalized = normalizeInvoice(res.data);
         setInvoices((prev) => [...(prev || []), normalized]);
+      }
+
+      // Check if response includes lowStockAlerts (indicates threshold crossing)
+      const lowStockAlerts = res.data.lowStockAlerts || [];
+
+      // Broadcast inventory/dashboard refresh so Overview/Inventory can update instantly.
+      window.dispatchEvent(new Event("dashboard:refresh"));
+      window.dispatchEvent(new CustomEvent("inventory:updated", { detail: { criticalAlerts: lowStockAlerts } }));
+
+      if (lowStockAlerts.length > 0) {
+        setCriticalPopupItems(lowStockAlerts);
+        setShowCriticalPopup(true);
+
+        const key = "appNotifications";
+        const existing = (() => {
+          try {
+            return JSON.parse(localStorage.getItem(key) || "[]");
+          } catch (e) {
+            return [];
+          }
+        })();
+
+        const entries = lowStockAlerts.map((a) => ({
+          id: `low-stock-${Date.now()}-${a.material}`,
+          type: "low-stock",
+          title: "Critical Low Stock Alert",
+          message: `${a.material} is low (${a.quantity} left, min ${a.minStock})`,
+          createdAt: new Date().toISOString(),
+        }));
+
+        localStorage.setItem(key, JSON.stringify([...entries, ...existing].slice(0, 30)));
       }
     } catch (err) {
       console.error("Error saving invoice:", err.response?.data || err.message);
@@ -447,6 +525,7 @@ const fetchInvoices = async () => {
   const resetForm = () => {
     setForm({
       id: null,
+      sourceOrderId: "",
       client: "",
       customerId: "",
       status: "pending",
@@ -879,7 +958,10 @@ const fetchInvoices = async () => {
       alert(`Invoice emailed to ${invoice.clientEmail || (invoice.customer && invoice.customer.email) || 'customer'}`);
     } catch (error) {
       console.error("Failed to send invoice via server:", error);
-      const msg = error.response?.data?.message || error.message || 'Failed to send invoice.';
+      // Show server-provided message and underlying error when available (temporary, for debugging)
+      const serverMessage = error.response?.data?.message;
+      const serverError = error.response?.data?.error;
+      const msg = serverError ? `${serverMessage || 'Failed to send invoice'}: ${serverError}` : serverMessage || error.message || 'Failed to send invoice.';
       alert(msg);
     } finally {
       setIsSendingEmail(null);
@@ -892,6 +974,20 @@ const fetchInvoices = async () => {
     .reduce((s, i) => s + i.amount, 0);
   const pendingCount = invoices.filter((i) => i.status === "pending").length;
   const paidCount = invoices.filter((i) => i.status === "paid").length;
+
+  const handleRefillFromPopup = () => {
+    if (!criticalPopupItems.length) return;
+    const target = criticalPopupItems[0];
+    const refillPrefill = {
+      source: "critical-low-stock",
+      materialName: target.material,
+      quantity: Number(target.minStock || 0),
+    };
+
+    localStorage.setItem("orderRefillPrefill", JSON.stringify(refillPrefill));
+    setShowCriticalPopup(false);
+    navigate("/orders", { state: { orderRefillPrefill: refillPrefill } });
+  };
 
   // ── Render ───────────────────────────────────────────────────
   return (
@@ -1318,6 +1414,47 @@ const fetchInvoices = async () => {
           </p>
         )}
       </div>
+
+      {/* ── Critical center popup ── */}
+      {showCriticalPopup && criticalPopupItems.length > 0 && (
+        <div className="fixed inset-0 bg-black/40 z-[60] flex items-center justify-center p-4">
+          <div className="max-w-lg w-full bg-white dark:bg-gray-800 rounded-2xl border border-red-200 dark:border-red-800 shadow-2xl p-5">
+            <div className="flex items-start justify-between gap-3 mb-3">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-red-500" />
+                <h3 className="text-base font-bold text-gray-900 dark:text-white">Critical Low Stock Alert</h3>
+              </div>
+              <button
+                onClick={() => setShowCriticalPopup(false)}
+                className="p-1.5 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700"
+              >
+                <X className="w-4 h-4 text-gray-500" />
+              </button>
+            </div>
+            <div className="space-y-2 mb-4">
+              {criticalPopupItems.map((m, idx) => (
+                <div key={`${m.material}-${idx}`} className="text-sm text-gray-700 dark:text-gray-300">
+                  <span className="font-semibold">{m.material}</span>: {m.quantity} left (min {m.minStock})
+                </div>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button
+                onClick={() => setShowCriticalPopup(false)}
+                className="w-full px-4 py-2.5 bg-gradient-to-r from-red-600 to-rose-600 hover:from-red-700 hover:to-rose-700 text-white rounded-xl font-semibold text-sm"
+              >
+                Acknowledge
+              </button>
+              <button
+                onClick={handleRefillFromPopup}
+                className="w-full px-4 py-2.5 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-700 hover:to-blue-700 text-white rounded-xl font-semibold text-sm"
+              >
+                Refill
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

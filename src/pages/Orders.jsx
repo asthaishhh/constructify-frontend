@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import axios from "../utils/axiosConfig";
+import { useNavigate, useLocation } from "react-router-dom";
 import {
   RefreshCw, Plus, X, Download, Search,
   FileText, Clock, CheckCircle, TrendingUp,
@@ -7,7 +8,12 @@ import {
   ArrowRightLeft, Hash,
 } from "lucide-react";
 
+const DEFAULT_MATERIAL_OPTIONS = ["sand", "bricks", "cement", "iron rods"];
+
 export default function TraderOrdersDashboard() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const processedRefillKeyRef = useRef("");
   const [activeTab, setActiveTab]       = useState("mine");
   const [query, setQuery]               = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
@@ -16,12 +22,14 @@ export default function TraderOrdersDashboard() {
   const [sortBy, setSortBy]             = useState("createdAt");
   const [sortOrder, setSortOrder]       = useState("desc");
   const [orders, setOrders]             = useState([]);
+  const [materials, setMaterials]       = useState([]);
+  const [customers, setCustomers]       = useState([]);
   const [loading, setLoading]           = useState(true);
   const [error, setError]               = useState(null);
   const [refreshing, setRefreshing]     = useState(false);
   const [showAddForm, setShowAddForm]   = useState(false);
   const [orderForm, setOrderForm]       = useState({
-    type: "mine", client: "", pair: "", side: "Buy", quantity: "", price: "", status: "open",
+    type: "mine", client: "", materialName: "", quantity: "", costPrice: "", status: "open",
   });
 
   useEffect(() => {
@@ -37,6 +45,10 @@ export default function TraderOrdersDashboard() {
       setOrders(
         response.data.map((o) => ({
           ...o,
+          materialName: o.materialName || o.material?.name || "",
+          sellingPrice: Number(o.sellingPrice ?? 0),
+          costPrice: Number(o.costPrice ?? 0),
+          profit: Number(o.profit ?? 0),
           createdAt: new Date(o.createdAt).toISOString().split("T")[0],
         }))
       );
@@ -50,6 +62,58 @@ export default function TraderOrdersDashboard() {
   };
 
   useEffect(() => { fetchOrders(); }, []);
+
+  const fetchMaterials = async () => {
+    try {
+      const res = await axios.get(`${API_URL}/api/materials`);
+      setMaterials(Array.isArray(res.data) ? res.data : []);
+    } catch (err) {
+      console.error("Failed to fetch materials:", err);
+    }
+  };
+
+  useEffect(() => { fetchMaterials(); }, []);
+
+  useEffect(() => {
+    const fromState = location?.state?.orderRefillPrefill;
+    const fromStorageRaw = localStorage.getItem("orderRefillPrefill");
+    const fromStorage = fromStorageRaw ? JSON.parse(fromStorageRaw) : null;
+    const prefill = fromState || fromStorage;
+
+    if (!prefill) return;
+    if (!materials.length) return;
+
+    const key = `${prefill.materialName || ""}-${prefill.quantity || ""}`;
+    if (processedRefillKeyRef.current === key) return;
+
+    const selectedMaterial = materials.find(
+      (m) => String(m.name || "").toLowerCase() === String(prefill.materialName || "").toLowerCase()
+    );
+
+    setActiveTab("mine");
+    setShowAddForm(true);
+    setOrderForm((prev) => ({
+      ...prev,
+      type: "mine",
+      materialName: selectedMaterial?.name || prefill.materialName || "",
+      quantity: String(Number(prefill.quantity || selectedMaterial?.minStock || 1)),
+      costPrice: selectedMaterial ? String(selectedMaterial.price ?? "") : prev.costPrice,
+    }));
+
+    processedRefillKeyRef.current = key;
+    localStorage.removeItem("orderRefillPrefill");
+  }, [location?.state, materials]);
+
+  const fetchCustomers = async () => {
+    try {
+      const res = await axios.get(`${API_URL}/api/customers`);
+      setCustomers(Array.isArray(res.data) ? res.data : []);
+    } catch (err) {
+      console.error("Failed to fetch customers:", err);
+    }
+  };
+
+  useEffect(() => { fetchCustomers(); }, []);
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -66,7 +130,7 @@ export default function TraderOrdersDashboard() {
       return (
         (o.id || "").toLowerCase().includes(q) ||
         (o.client || "").toLowerCase().includes(q) ||
-        (o.pair || "").toLowerCase().includes(q)
+        (o.materialName || "").toLowerCase().includes(q)
       );
     })
     .filter((o) => {
@@ -87,7 +151,7 @@ export default function TraderOrdersDashboard() {
     new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", minimumFractionDigits: 0, maximumFractionDigits: 2 }).format(price);
 
   const exportCSV = () => {
-    const header = ["id", "type", "client", "pair", "side", "quantity", "price", "status", "createdAt"];
+    const header = ["id", "type", "client", "materialName", "quantity", "costPrice", "status", "createdAt"];
     const rows = filtered.map((o) => header.map((h) => JSON.stringify(o[h] ?? "")).join(","));
     const csv  = [header.join(","), ...rows].join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -99,7 +163,7 @@ export default function TraderOrdersDashboard() {
 
   const onView = (id) => {
     const o = orders.find((o) => o.id === id);
-    if (o) alert(`Order Details:\n\nID: ${o.id}\nClient: ${o.client}\nPair: ${o.pair}\nSide: ${o.side}\nQty: ${o.quantity}\nPrice: ${formatINR(o.price)}\nStatus: ${o.status}\nCreated: ${o.createdAt}`);
+    if (o) alert(`Order Details:\n\nID: ${o.id}\nClient: ${o.client}\nMaterial: ${o.materialName}\nQty: ${o.quantity}\nCost Price: ${formatINR(o.costPrice)}\nStatus: ${o.status}\nCreated: ${o.createdAt}`);
   };
 
   const onCancel = async (id) => {
@@ -107,35 +171,82 @@ export default function TraderOrdersDashboard() {
     try {
       const o = orders.find((o) => o.id === id);
       if (!o) return;
-      await axios.put(`${API_URL}/api/orders/${o._id}`, { status: "cancelled" });
+      await axios.put(`${API_URL}/api/orders/${o._id}/status`, { status: "cancelled" });
       setOrders(orders.map((o) => (o.id === id ? { ...o, status: "cancelled" } : o)));
     } catch (err) {
       alert("Failed to cancel order");
     }
   };
 
+  const onMarkReceived = async (id) => {
+    try {
+      const o = orders.find((x) => x.id === id);
+      if (!o) return;
+      await axios.put(`${API_URL}/api/orders/${o._id}/status`, { status: "received" });
+      setOrders((prev) => prev.map((x) => (x.id === id ? { ...x, status: "received" } : x)));
+    } catch (err) {
+      alert("Failed to update status to Recieved");
+    }
+  };
+
+  const handleCreateInvoice = (order) => {
+    const matchedCustomer = customers.find((c) => c.name === order.client);
+    const prefill = {
+      source: "customer-order",
+      sourceOrderId: order._id,
+      orderId: order.id,
+      customerId: matchedCustomer?._id || "",
+      client: order.client || "",
+      materialName: order.materialName || "",
+      quantity: Number(order.quantity || 1),
+      // Selling rate must be decided at invoice time, so do not prefill from cost.
+      rate: "",
+      status: "pending",
+    };
+
+    localStorage.setItem("invoicePrefillFromOrder", JSON.stringify(prefill));
+    navigate("/bill", { state: { invoicePrefill: prefill } });
+  };
+
   const handleAddOrder = async () => {
-    if (!orderForm.client || !orderForm.pair || !orderForm.quantity || !orderForm.price) {
+    if (!orderForm.client || !orderForm.materialName || !orderForm.quantity) {
       alert("Please fill all required fields!"); return;
     }
+
+    const typedCost = Number(orderForm.costPrice);
+    const hasTypedCost = String(orderForm.costPrice || "").trim() !== "" && Number.isFinite(typedCost) && typedCost >= 0;
+    if (!hasTypedCost) {
+      alert("Cost price is required.");
+      return;
+    }
+
+    const selectedMaterial = materials.find((m) => m.name === orderForm.materialName);
+    if (activeTab === "customers" && !selectedMaterial) {
+      alert("Selected material is not in inventory. Add it in Inventory first, then create the order.");
+      return;
+    }
+    const cost = typedCost;
+
     try {
-      const maxId = orders.reduce((max, o) => {
-        const n = parseInt((o.id || "ORD-0000").split("-")[1], 10);
-        return n > max ? n : max;
-      }, 0);
       const newOrder = {
-        id: `ORD-${String(maxId + 1).padStart(4, "0")}`,
         ...orderForm,
         quantity: Number(orderForm.quantity),
-        price: Number(orderForm.price),
+        costPrice: cost,
         createdAt: new Date().toISOString(),
       };
       const res = await axios.post(`${API_URL}/api/orders`, newOrder);
-      setOrders([...orders, res.data]);
+      const created = res.data?.order || res.data;
+      setOrders([...orders, {
+        ...created,
+        materialName: created.materialName || created.material?.name || "",
+        sellingPrice: Number(created.sellingPrice ?? 0),
+        costPrice: Number(created.costPrice ?? cost),
+        profit: Number(created.profit ?? 0),
+      }]);
       setShowAddForm(false);
-      setOrderForm({ type: activeTab, client: "", pair: "", side: "Buy", quantity: "", price: "", status: "open" });
+      setOrderForm({ type: activeTab, client: "", materialName: "", quantity: "", costPrice: "", status: "open" });
     } catch (err) {
-      alert("Failed to add order");
+      alert(err?.response?.data?.message || "Failed to add order");
     }
   };
 
@@ -146,7 +257,8 @@ export default function TraderOrdersDashboard() {
 
   const stats = {
     total:     filtered.length,
-    notional:  filtered.reduce((s, o) => s + (o.quantity * o.price || 0), 0),
+    notional:  filtered.reduce((s, o) => s + (o.quantity * o.costPrice || 0), 0),
+    profit:    filtered.reduce((s, o) => s + (Number(o.profit) || 0), 0),
     open:      filtered.filter((o) => o.status === "open").length,
     completed: filtered.filter((o) => o.status === "completed" || o.status === "executed").length,
   };
@@ -156,6 +268,7 @@ export default function TraderOrdersDashboard() {
       case "open":      return { dot: "bg-amber-400",  badge: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400"   };
       case "executed":
       case "completed": return { dot: "bg-green-500",  badge: "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400"   };
+      case "received":  return { dot: "bg-indigo-500", badge: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300" };
       case "cancelled": return { dot: "bg-red-500",    badge: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400"           };
       default:          return { dot: "bg-gray-400",   badge: "bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-400"          };
     }
@@ -168,6 +281,10 @@ export default function TraderOrdersDashboard() {
     "outline-none transition-all";
 
   const hasActiveFilters = query || statusFilter !== "all" || dateFrom || dateTo;
+  const myOrderMaterialOptions = [...new Set([
+    ...DEFAULT_MATERIAL_OPTIONS,
+    ...materials.map((m) => String(m.name || "").trim().toLowerCase()).filter(Boolean),
+  ])];
 
   /* ── Loading ── */
   if (loading)
@@ -256,9 +373,10 @@ export default function TraderOrdersDashboard() {
         <section className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6">
           {[
             { label: "Total Orders", value: stats.total,              sub: "Current view",        icon: <FileText className="w-5 h-5 text-blue-600 dark:text-blue-400" />,       bg: "bg-blue-50 dark:bg-blue-900/20"   },
-            { label: "Total Value",  value: formatINR(stats.notional),sub: "Sum of all orders",   icon: <span className="text-base font-bold text-green-600 dark:text-green-400">₹</span>, bg: "bg-green-50 dark:bg-green-900/20" },
+            { label: "Total Cost",   value: formatINR(stats.notional),sub: "Cost at order time",  icon: <span className="text-base font-bold text-green-600 dark:text-green-400">₹</span>, bg: "bg-green-50 dark:bg-green-900/20" },
+            { label: "Net Profit",   value: formatINR(stats.profit),  sub: "Computed at invoice", icon: <TrendingUp className="w-5 h-5 text-indigo-500" />,                      bg: "bg-indigo-50 dark:bg-indigo-900/20"},
             { label: "Open Orders",  value: stats.open,               sub: "Awaiting execution",  icon: <Clock className="w-5 h-5 text-amber-500" />,                             bg: "bg-amber-50 dark:bg-amber-900/20" },
-            { label: "Completed",    value: stats.completed,          sub: "Successfully executed",icon: <CheckCircle className="w-5 h-5 text-indigo-500" />,                    bg: "bg-indigo-50 dark:bg-indigo-900/20"},
+            { label: "Completed",    value: stats.completed,          sub: "Successfully executed",icon: <CheckCircle className="w-5 h-5 text-emerald-500" />,                   bg: "bg-emerald-50 dark:bg-emerald-900/20"},
           ].map(({ label, value, sub, icon, bg }) => (
             <div key={label} className="bg-white dark:bg-gray-800 rounded-2xl p-4 sm:p-5 border border-gray-200 dark:border-gray-700 shadow-sm hover:shadow-md transition-all duration-200 hover:-translate-y-0.5">
               <div className="flex items-start justify-between gap-2 mb-3">
@@ -288,34 +406,76 @@ export default function TraderOrdersDashboard() {
                   <label className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1.5">
                     <User className="w-3.5 h-3.5" /> {activeTab === "mine" ? "Firm Name" : "Client"} *
                   </label>
-                  <input placeholder={activeTab === "mine" ? "Firm name…" : "Client name…"} value={orderForm.client}
-                    onChange={(e) => setOrderForm({ ...orderForm, client: e.target.value })} className={inputCls} />
+                  {activeTab === "customers" ? (
+                    <select
+                      value={orderForm.client}
+                      onChange={(e) => setOrderForm({ ...orderForm, client: e.target.value })}
+                      className={inputCls}
+                    >
+                      <option value="">Select customer</option>
+                      {customers.map((cust) => (
+                        <option key={cust._id} value={cust.name}>
+                          {cust.name}{cust.companyName ? ` (${cust.companyName})` : ""}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      placeholder="Firm name..."
+                      value={orderForm.client}
+                      onChange={(e) => setOrderForm({ ...orderForm, client: e.target.value })}
+                      className={inputCls}
+                    />
+                  )}
                 </div>
                 <div>
                   <label className="flex items-center gap-1.5 text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1.5">
-                    <ArrowRightLeft className="w-3.5 h-3.5" /> Trading Pair *
+                    <ArrowRightLeft className="w-3.5 h-3.5" /> Material *
                   </label>
-                  <input placeholder="e.g. BTC/INR" value={orderForm.pair}
-                    onChange={(e) => setOrderForm({ ...orderForm, pair: e.target.value })} className={inputCls} />
+                  <select
+                    value={orderForm.materialName}
+                    onChange={(e) => {
+                      const name = e.target.value;
+                      const m = materials.find((x) => x.name === name);
+                      setOrderForm({ ...orderForm, materialName: name, costPrice: m ? String(m.price ?? "") : orderForm.costPrice });
+                    }}
+                    className={inputCls}
+                    disabled={activeTab === "customers" && !materials.length}
+                  >
+                    <option value="">
+                      {activeTab === "customers"
+                        ? (materials.length ? "Select material" : "No materials found")
+                        : "Select material"}
+                    </option>
+                    {(activeTab === "customers" ? materials.map((m) => m.name) : myOrderMaterialOptions).map((name) => (
+                      <option key={name} value={name}>{name}</option>
+                    ))}
+                  </select>
+                  {activeTab === "customers" && !materials.length && (
+                    <p className="text-xs text-amber-600 dark:text-amber-400 mt-1.5">
+                      Add material from Inventory first, then create order.
+                    </p>
+                  )}
+                  {activeTab === "mine" && (
+                    <p className="text-xs text-indigo-600 dark:text-indigo-300 mt-1.5">
+                      New materials can be procured from My Orders and will appear in inventory.
+                    </p>
+                  )}
                 </div>
                 <div>
-                  <label className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1.5 block">Side</label>
-                  <select value={orderForm.side} onChange={(e) => setOrderForm({ ...orderForm, side: e.target.value })} className={inputCls}>
-                    <option value="Buy">Buy</option>
-                    <option value="Sell">Sell</option>
-                  </select>
+                  <label className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1.5 block">Cost Price (₹) *</label>
+                  <input type="number" placeholder="0" min="0" value={orderForm.costPrice}
+                    onChange={(e) => setOrderForm({ ...orderForm, costPrice: e.target.value })} className={inputCls} />
                 </div>
                 <div>
                   <label className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1.5 block">Quantity *</label>
                   <input type="number" placeholder="0" min="0" value={orderForm.quantity}
                     onChange={(e) => setOrderForm({ ...orderForm, quantity: e.target.value })} className={inputCls} />
                 </div>
-                <div>
-                  <label className="text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wide mb-1.5 block">Price (₹) *</label>
-                  <input type="number" placeholder="0" min="0" value={orderForm.price}
-                    onChange={(e) => setOrderForm({ ...orderForm, price: e.target.value })} className={inputCls} />
-                </div>
                 <div className="flex flex-col justify-end">
+                  <div className="text-xs text-gray-500 dark:text-gray-400 mb-2">
+                    Selling price and profit will be finalized during invoice generation.
+                  </div>
                   <div className="flex flex-col-reverse sm:flex-row gap-3">
                     <button onClick={() => setShowAddForm(false)}
                       className="w-full px-4 py-2.5 bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 text-gray-700 dark:text-gray-300 rounded-xl font-semibold text-sm transition-all active:scale-95">
@@ -342,7 +502,7 @@ export default function TraderOrdersDashboard() {
                 <input
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
-                  placeholder="Search by order ID, client, or pair…"
+                  placeholder="Search by order ID, client, or material…"
                   className="w-full pl-9 pr-9 py-2.5 border-2 border-gray-200 dark:border-gray-600 rounded-xl bg-gray-50 dark:bg-gray-700/60 text-gray-900 dark:text-white placeholder-gray-400 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none transition-all"
                 />
                 {query && (
@@ -357,6 +517,7 @@ export default function TraderOrdersDashboard() {
                   className="flex-1 sm:flex-none border-2 border-gray-200 dark:border-gray-600 rounded-xl px-3 py-2.5 bg-gray-50 dark:bg-gray-700/60 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all cursor-pointer min-w-[120px]">
                   <option value="all">All Status</option>
                   <option value="open">Open</option>
+                  <option value="received">Recieved</option>
                   <option value="executed">Executed</option>
                   <option value="completed">Completed</option>
                   <option value="cancelled">Cancelled</option>
@@ -365,7 +526,8 @@ export default function TraderOrdersDashboard() {
                 <select value={sortBy} onChange={(e) => setSortBy(e.target.value)}
                   className="flex-1 sm:flex-none border-2 border-gray-200 dark:border-gray-600 rounded-xl px-3 py-2.5 bg-gray-50 dark:bg-gray-700/60 text-gray-900 dark:text-white text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all cursor-pointer min-w-[120px]">
                   <option value="createdAt">Sort: Date</option>
-                  <option value="price">Sort: Price</option>
+                  <option value="costPrice">Sort: Cost Price</option>
+                  <option value="profit">Sort: Profit</option>
                   <option value="quantity">Sort: Qty</option>
                 </select>
 
@@ -443,9 +605,6 @@ export default function TraderOrdersDashboard() {
                       <div className="min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">
                           <span className="font-bold text-gray-900 dark:text-white text-sm">{o.id}</span>
-                          <span className={`inline-flex items-center px-2 py-0.5 text-xs font-bold rounded-lg ${o.side === "Buy" ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400" : "bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-400"}`}>
-                            {o.side}
-                          </span>
                           <span className={`inline-flex items-center gap-1 px-2 py-0.5 text-xs font-bold rounded-full ${sm.badge}`}>
                             <span className={`w-1.5 h-1.5 rounded-full ${sm.dot}`} />{o.status}
                           </span>
@@ -462,6 +621,24 @@ export default function TraderOrdersDashboard() {
                           className="p-2 text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-900/30 rounded-lg transition-all" title="View">
                           <FileText className="w-4 h-4" />
                         </button>
+                        {activeTab === "customers" && (
+                          <button
+                            onClick={() => handleCreateInvoice(o)}
+                            className="p-2 text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg transition-all"
+                            title="Create Invoice"
+                          >
+                            <Plus className="w-4 h-4" />
+                          </button>
+                        )}
+                        {activeTab === "mine" && o.status === "open" && (
+                          <button
+                            onClick={() => onMarkReceived(o.id)}
+                            className="p-2 text-indigo-600 dark:text-indigo-300 hover:bg-indigo-50 dark:hover:bg-indigo-900/30 rounded-lg transition-all"
+                            title="Mark as Recieved"
+                          >
+                            <CheckCircle className="w-4 h-4" />
+                          </button>
+                        )}
                         {o.status === "open" && (
                           <button onClick={() => onCancel(o.id)}
                             className="p-2 text-red-500 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/30 rounded-lg transition-all" title="Cancel">
@@ -474,8 +651,8 @@ export default function TraderOrdersDashboard() {
                     {/* Detail grid */}
                     <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
                       <div>
-                        <p className="text-gray-400 dark:text-gray-500 mb-0.5 flex items-center gap-1"><ArrowRightLeft className="w-3 h-3" />Pair</p>
-                        <p className="font-semibold text-gray-800 dark:text-gray-200">{o.pair}</p>
+                        <p className="text-gray-400 dark:text-gray-500 mb-0.5 flex items-center gap-1"><ArrowRightLeft className="w-3 h-3" />Material</p>
+                        <p className="font-semibold text-gray-800 dark:text-gray-200">{o.materialName}</p>
                       </div>
                       <div>
                         <p className="text-gray-400 dark:text-gray-500 mb-0.5">Quantity</p>
@@ -483,7 +660,11 @@ export default function TraderOrdersDashboard() {
                       </div>
                       <div>
                         <p className="text-gray-400 dark:text-gray-500 mb-0.5">Price</p>
-                        <p className="font-bold text-green-600 dark:text-green-400">{formatINR(o.price)}</p>
+                        <p className="font-bold text-green-600 dark:text-green-400">{formatINR(o.costPrice)}</p>
+                      </div>
+                      <div>
+                        <p className="text-gray-400 dark:text-gray-500 mb-0.5">Profit</p>
+                        <p className="font-bold text-indigo-600 dark:text-indigo-400">{formatINR(o.profit)}</p>
                       </div>
                       <div>
                         <p className="text-gray-400 dark:text-gray-500 mb-0.5 flex items-center gap-1"><Calendar className="w-3 h-3" />Created</p>
@@ -511,7 +692,7 @@ export default function TraderOrdersDashboard() {
                   {[
                     "Order ID",
                     activeTab === "mine" ? "Firm Name" : "Client",
-                    "Pair", "Side", "Quantity", "Price (₹)", "Status", "Created", "Actions"
+                    "Material", "Quantity", "Cost (₹)", "Profit (₹)", "Status", "Created", "Actions"
                   ].map((h) => (
                     <th key={h} className="py-3.5 px-4 text-left text-xs font-bold text-gray-500 dark:text-gray-400 uppercase tracking-wider whitespace-nowrap">
                       {h}
@@ -531,23 +712,19 @@ export default function TraderOrdersDashboard() {
                         {o.client || "—"}
                       </td>
                       <td className="py-3.5 px-4">
-                        <span className="font-semibold text-gray-900 dark:text-white text-sm">{o.pair}</span>
-                      </td>
-                      <td className="py-3.5 px-4">
-                        <span className={`inline-flex items-center px-2.5 py-1 text-xs font-bold rounded-lg ${
-                          o.side === "Buy"
-                            ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400"
-                            : "bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-400"
-                        }`}>
-                          {o.side}
-                        </span>
+                        <span className="font-semibold text-gray-900 dark:text-white text-sm">{o.materialName}</span>
                       </td>
                       <td className="py-3.5 px-4 text-sm font-semibold text-gray-700 dark:text-gray-300">
                         {o.quantity?.toLocaleString("en-IN")}
                       </td>
                       <td className="py-3.5 px-4">
-                        <span className="text-sm font-bold text-green-700 dark:text-green-400">
-                          {formatINR(o.price)}
+                        <span className="text-sm font-semibold text-gray-700 dark:text-gray-300">
+                          {formatINR(o.costPrice)}
+                        </span>
+                      </td>
+                      <td className="py-3.5 px-4">
+                        <span className="text-sm font-bold text-indigo-700 dark:text-indigo-400">
+                          {formatINR(o.profit)}
                         </span>
                       </td>
                       <td className="py-3.5 px-4">
@@ -567,6 +744,22 @@ export default function TraderOrdersDashboard() {
                             className="px-2.5 py-1.5 text-xs font-semibold text-blue-600 dark:text-blue-400 hover:bg-blue-100 dark:hover:bg-blue-900/40 rounded-lg transition-all">
                             View
                           </button>
+                          {activeTab === "customers" && (
+                            <button
+                              onClick={() => handleCreateInvoice(o)}
+                              className="px-2.5 py-1.5 text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 rounded-lg transition-all"
+                            >
+                              Create Invoice
+                            </button>
+                          )}
+                          {activeTab === "mine" && o.status === "open" && (
+                            <button
+                              onClick={() => onMarkReceived(o.id)}
+                              className="px-2.5 py-1.5 text-xs font-semibold text-indigo-600 dark:text-indigo-300 hover:bg-indigo-100 dark:hover:bg-indigo-900/40 rounded-lg transition-all"
+                            >
+                              Recieved
+                            </button>
+                          )}
                           {o.status === "open" && (
                             <button onClick={() => onCancel(o.id)}
                               className="px-2.5 py-1.5 text-xs font-semibold text-red-500 dark:text-red-400 hover:bg-red-100 dark:hover:bg-red-900/40 rounded-lg transition-all">
