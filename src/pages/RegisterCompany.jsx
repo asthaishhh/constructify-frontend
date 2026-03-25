@@ -222,31 +222,17 @@ export default function RegisterCompany() {
     (async () => {
       setIsSubmitting(true);
       try {
-        const apiBase = import.meta.env.VITE_API_BASE || "http://localhost:5000";
-        const resp = await fetch(`${apiBase}/api/auth/register-company`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            companyName: form.companyName,
-            companyTagline: form.companyTagline,
-            logo: form.logo,
-            ownerName: form.ownerName,
-            gstIn: form.gstIn,
-            address: form.address,
-            phone: form.phone,
-            email: form.email,
-            password: form.password,
-          }),
+        const { data } = await axios.post("/api/auth/register-company", {
+          companyName: form.companyName,
+          companyTagline: form.companyTagline,
+          logo: form.logo,
+          ownerName: form.ownerName,
+          gstIn: form.gstIn,
+          address: form.address,
+          phone: form.phone,
+          email: form.email,
+          password: form.password,
         });
-
-        const data = await resp.json();
-        if (!resp.ok) {
-          // server-side validation error
-          const message = data?.message || (data?.errors ? data.errors.join(", ") : "Signup failed");
-          setErrors((prev) => ({ ...prev, form: message }));
-          setIsSubmitting(false);
-          return;
-        }
 
         // Do NOT auto-login. Save company profile locally (without password)
         const { password: _p, confirmPassword: _c, ...profileToSave } = form;
@@ -260,7 +246,12 @@ export default function RegisterCompany() {
         }, 800);
       } catch (err) {
         console.error(err);
-        setErrors((prev) => ({ ...prev, form: "Network or server error during signup" }));
+        const message =
+          err?.response?.data?.message ||
+          (Array.isArray(err?.response?.data?.errors)
+            ? err.response.data.errors.join(", ")
+            : "Network or server error during signup");
+        setErrors((prev) => ({ ...prev, form: message }));
         setIsSubmitting(false);
       }
     })();
