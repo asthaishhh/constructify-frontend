@@ -68,6 +68,50 @@ const INITIAL_STATE = {
   confirmPassword: "",
 };
 
+const normalizeRegisterPayload = (form) => ({
+  companyName: String(form.companyName || "").trim(),
+  companyTagline: String(form.companyTagline || "").trim(),
+  ownerName: String(form.ownerName || "").trim(),
+  gstIn: String(form.gstIn || "").trim().toUpperCase(),
+  address: String(form.address || "").trim(),
+  phone: String(form.phone || "").trim(),
+  email: String(form.email || "").trim().toLowerCase(),
+  password: String(form.password || ""),
+});
+
+const parseApiError = (error) => {
+  const data = error?.response?.data || {};
+
+  const fieldErrors =
+    data?.fieldErrors && typeof data.fieldErrors === "object"
+      ? Object.fromEntries(
+          Object.entries(data.fieldErrors).map(([key, value]) => [
+            key,
+            Array.isArray(value) ? value.join(", ") : String(value || ""),
+          ])
+        )
+      : {};
+
+  const arrayErrors = Array.isArray(data?.errors)
+    ? data.errors
+        .map((entry) => {
+          if (typeof entry === "string") return entry;
+          if (entry?.msg) return entry.msg;
+          if (entry?.message) return entry.message;
+          return "";
+        })
+        .filter(Boolean)
+    : [];
+
+  const message =
+    data?.message ||
+    data?.error ||
+    (arrayErrors.length ? arrayErrors.join(", ") : "") ||
+    "Network or server error during signup";
+
+  return { message, fieldErrors };
+};
+
 export default function RegisterCompany() {
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
@@ -239,39 +283,37 @@ const removeLogo = () => {
   setIsSubmitting(true);
 
   try {
+    const normalized = normalizeRegisterPayload(form);
+
     const formData = new FormData();
-    formData.append("companyName", form.companyName);
-    formData.append("companyTagline", form.companyTagline);
-    formData.append("ownerName", form.ownerName);
-    formData.append("gstIn", form.gstIn);
-    formData.append("address", form.address);
-    formData.append("phone", form.phone);
-    formData.append("email", form.email);
-    formData.append("password", form.password);
+    formData.append("companyName", normalized.companyName);
+    formData.append("companyTagline", normalized.companyTagline);
+    formData.append("ownerName", normalized.ownerName);
+    formData.append("gstIn", normalized.gstIn);
+    formData.append("address", normalized.address);
+    formData.append("phone", normalized.phone);
+    formData.append("email", normalized.email);
+    formData.append("password", normalized.password);
 
     if (logoFile) {
       formData.append("logo", logoFile);
     }
 
-    const { data } = await axios.post("/api/auth/register-company", formData, {
-      headers: {
-        "Content-Type": "multipart/form-data",
-      },
-    });
+    const { data } = await axios.post("/api/auth/register-company", formData);
 
     // backend should return uploaded Cloudinary URL as companyProfile.logo or logo
     const savedLogo =
       data?.companyProfile?.logo || data?.logo || "";
 
     const profileToSave = {
-      companyName: form.companyName,
-      companyTagline: form.companyTagline,
+      companyName: normalized.companyName,
+      companyTagline: normalized.companyTagline,
       logo: savedLogo,
-      ownerName: form.ownerName,
-      gstIn: form.gstIn,
-      address: form.address,
-      phone: form.phone,
-      email: form.email,
+      ownerName: normalized.ownerName,
+      gstIn: normalized.gstIn,
+      address: normalized.address,
+      phone: normalized.phone,
+      email: normalized.email,
     };
 
     saveCompanyProfile(profileToSave, { email: profileToSave.email });
@@ -291,17 +333,12 @@ const removeLogo = () => {
     setSaved(true);
 
     setTimeout(() => {
-      navigate("/login", { state: { email: form.email } });
+      navigate("/login", { state: { email: normalized.email } });
     }, 800);
   } catch (err) {
     console.error(err);
-    const message =
-      err?.response?.data?.message ||
-      (Array.isArray(err?.response?.data?.errors)
-        ? err.response.data.errors.join(", ")
-        : "Network or server error during signup");
-
-    setErrors((prev) => ({ ...prev, form: message }));
+    const { message, fieldErrors } = parseApiError(err);
+    setErrors((prev) => ({ ...prev, ...fieldErrors, form: message }));
   } finally {
     setIsSubmitting(false);
   }
