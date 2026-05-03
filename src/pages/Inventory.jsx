@@ -13,6 +13,8 @@ const MATERIAL_UNIT_OPTIONS = ["kg", "ton", "bags", "pieces", "m3"];
 export default function Inventory() {
   const navigate = useNavigate();
   const NOTIF_KEY = "appNotifications";
+  const DETECTOR_URL = "https://constructify-detection-model.onrender.com/detect";
+  const INVENTORY_REFRESH_INTERVAL_MS = 15000;
   const [materials, setMaterials] = useState([]);
   const [search, setSearch] = useState("");
   const [showModal, setShowModal] = useState(false);
@@ -25,14 +27,24 @@ export default function Inventory() {
   const [showCriticalPopup, setShowCriticalPopup] = useState(false);
   const [criticalPopupItems, setCriticalPopupItems] = useState([]);
   const prevCriticalSignaturesRef = useRef(new Set());
+  const detectionFileInputRef = useRef(null);
+  const [detectionSource, setDetectionSource] = useState("");
+  const [detectionFile, setDetectionFile] = useState(null);
+  const [detectionLoading, setDetectionLoading] = useState(false);
+  const [detectionError, setDetectionError] = useState("");
+  const [detectionResult, setDetectionResult] = useState(null);
+  const [detectionRecords, setDetectionRecords] = useState([]);
+  const [detectionsLoading, setDetectionsLoading] = useState(false);
+  const [captureRequest, setCaptureRequest] = useState(null);
+  const [captureStatus, setCaptureStatus] = useState("");
 
-  const API_URL = import.meta.env.VITE_API_URL || "";
+  const API_URL = (import.meta.env.VITE_API_URL || "").replace(/\/api\/?$/, "");
 
   const fetchMaterials = async () => {
     setLoading(true);
     try {
       const res = await axios.get(`${API_URL}/api/materials`);
-      setMaterials(res.data);
+      setMaterials(Array.isArray(res.data) ? res.data : res.data?.materials || []);
     } catch (err) {
       console.error("Error fetching materials:", err);
     } finally {
@@ -40,7 +52,107 @@ export default function Inventory() {
     }
   };
 
-  useEffect(() => { fetchMaterials(); }, []);
+  const fetchDetections = async () => {
+    try {
+      const res = await axios.get(`${API_URL}/api/detections`);
+      setDetectionRecords(res.data?.records || []);
+    } catch (err) {
+      console.warn("Failed to load detection records:", err);
+    }
+  };
+
+  const fetchCaptureRequest = async (requestId) => {
+    const res = await axios.get(`${API_URL}/api/detections/requests/${requestId}`);
+    return res.data?.request || null;
+  };
+
+  const fetchLatestDetection = async () => {
+    const res = await axios.get(`${API_URL}/api/detections/latest`);
+    return res.data?.record || null;
+  };
+
+  const refreshInventoryView = async () => {
+    await Promise.all([fetchMaterials(), fetchDetections()]);
+  };
+
+  const waitForDetectionRecord = async (requestId, requestStartedAt, timeoutMs = 180000) => {
+    const startedAt = Date.now();
+    const requestStartedTime = requestStartedAt ? new Date(requestStartedAt).getTime() : startedAt;
+    while (Date.now() - startedAt < timeoutMs) {
+      const request = await fetchCaptureRequest(requestId);
+      setCaptureRequest(request);
+      setCaptureStatus(request?.status || "pending");
+
+      const resolvedRecord = request?.record || request?.completedRecordId || null;
+      if ((request?.status === "resolved" || request?.status === "completed") && resolvedRecord) {
+        setDetectionResult(resolvedRecord);
+        await refreshInventoryView();
+        window.dispatchEvent(new CustomEvent("inventory:updated", {
+          detail: { source: "esp-detection", requestId },
+        }));
+        return resolvedRecord;
+      }
+
+      const latestRecord = await fetchLatestDetection();
+      const latestCreatedAt = latestRecord?.createdAt ? new Date(latestRecord.createdAt).getTime() : 0;
+      const latestDeviceId = latestRecord?.espResponse?.deviceId || "";
+      if (
+        latestRecord &&
+        latestCreatedAt >= requestStartedTime &&
+        (
+          String(latestRecord.requestId || "") === String(requestId) ||
+          latestRecord.source === "esp" ||
+          latestDeviceId === "esp32cam-1"
+        )
+      ) {
+        setDetectionResult(latestRecord);
+        await refreshInventoryView();
+        window.dispatchEvent(new CustomEvent("inventory:updated", {
+          detail: { source: "esp-detection", requestId },
+        }));
+        return latestRecord;
+      }
+
+      if (request?.status === "failed") {
+        throw new Error("ESP request failed before completing the capture.");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    }
+    setCaptureStatus("processing");
+    return null;
+  };
+
+  // Trigger ESP through backend proxy, then fetch records
+  const triggerESPCapture = async () => {
+    setDetectionsLoading(true);
+    try {
+      const resp = await axios.post(`${API_URL}/api/detections/trigger-esp`, {
+        deviceId: "esp32cam-1",
+      });
+
+      const requestId = resp.data?.request?._id;
+      if (!requestId) {
+        throw new Error("No capture request was created on Render.");
+      }
+
+      setDetectionError("");
+      setDetectionResult(null);
+      setCaptureRequest(resp.data?.request || null);
+      setCaptureStatus(resp.data?.request?.status || "pending");
+      void waitForDetectionRecord(requestId, resp.data?.request?.requestedAt || resp.data?.request?.createdAt);
+    } catch (err) {
+      console.error("ESP trigger failed:", err.message);
+      setDetectionError(err.message || "Failed to trigger capture.");
+    } finally {
+      setDetectionsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    refreshInventoryView();
+    const intervalId = setInterval(refreshInventoryView, INVENTORY_REFRESH_INTERVAL_MS);
+    return () => clearInterval(intervalId);
+  }, []);
 
   useEffect(() => {
     try {
@@ -53,7 +165,7 @@ export default function Inventory() {
 
   useEffect(() => {
     const onInventoryUpdated = () => {
-      fetchMaterials();
+      refreshInventoryView();
       try {
         const existing = JSON.parse(localStorage.getItem(NOTIF_KEY) || "[]");
         setNotifications(Array.isArray(existing) ? existing : []);
@@ -65,6 +177,96 @@ export default function Inventory() {
     window.addEventListener("inventory:updated", onInventoryUpdated);
     return () => window.removeEventListener("inventory:updated", onInventoryUpdated);
   }, []);
+
+  const handleDetectionFileChange = (e) => {
+    const file = e.target.files?.[0] || null;
+    setDetectionFile(file);
+    setDetectionError("");
+    if (file) setDetectionSource("");
+  };
+
+  const handleRunDetection = async () => {
+    if (!detectionFile && !detectionSource.trim()) {
+      setDetectionError("Add an ESP32-CAM image URL or upload a snapshot first.");
+      return;
+    }
+
+    setDetectionLoading(true);
+    setDetectionError("");
+    setDetectionResult(null);
+
+    try {
+      let response;
+
+      if (detectionFile) {
+        const formData = new FormData();
+        formData.append("file", detectionFile);
+        formData.append("image", detectionFile);
+        response = await fetch(DETECTOR_URL, {
+          method: "POST",
+          body: formData,
+        });
+      } else {
+        const imageUrl = detectionSource.trim();
+        const imageResponse = await fetch(imageUrl);
+        if (!imageResponse.ok) {
+          throw new Error(`Unable to fetch image from URL (${imageResponse.status})`);
+        }
+
+        const imageBlob = await imageResponse.blob();
+        const inferredName = imageUrl.split("/").pop() || "esp32-cam.jpg";
+        const imageFile = new File([imageBlob], inferredName, { type: imageBlob.type || "image/jpeg" });
+
+        const formData = new FormData();
+        formData.append("file", imageFile);
+        formData.append("image", imageFile);
+        formData.append("imageUrl", imageUrl);
+
+        response = await fetch(DETECTOR_URL, {
+          method: "POST",
+          body: formData,
+        });
+      }
+
+      const contentType = response.headers.get("content-type") || "";
+      const payload = contentType.includes("application/json")
+        ? await response.json()
+        : { raw: await response.text() };
+
+      if (!response.ok) {
+        throw new Error(payload?.message || payload?.error || `Detection failed (${response.status})`);
+      }
+
+      setDetectionResult(payload);
+    } catch (error) {
+      setDetectionError(error?.message || "Failed to run detection.");
+    } finally {
+      setDetectionLoading(false);
+    }
+  };
+
+  const detectionSummary = (() => {
+    const payload = detectionResult;
+    if (!payload) return null;
+
+    const detections =
+      payload.detections ||
+      payload.predictions ||
+      payload.objects ||
+      payload.results ||
+      payload.data ||
+      null;
+
+    const count = Array.isArray(detections)
+      ? detections.length
+      : Number(payload.count ?? payload.total ?? payload.numDetections ?? 0) || 0;
+
+    const firstLabel = Array.isArray(detections) && detections.length > 0
+      ? String(detections[0]?.class || detections[0]?.label || detections[0]?.name || detections[0]?.object || "").trim()
+      : "";
+
+    return { count, firstLabel };
+  })();
 
   useEffect(() => {
     const criticalItems = materials.filter((m) => {
@@ -317,6 +519,105 @@ export default function Inventory() {
           <p className="text-xs sm:text-sm text-indigo-700 dark:text-indigo-300 font-medium">
             Inventory additions are managed through My Orders completion. Use Orders page to procure and refill stock.
           </p>
+        </section>
+
+        <section className="bg-white dark:bg-gray-800 rounded-2xl border border-gray-200 dark:border-gray-700 shadow-sm p-4 sm:p-5 mb-4 sm:mb-6">
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div>
+                <h2 className="text-base sm:text-lg font-bold text-gray-900 dark:text-white">ESP32-CAM Detection</h2>
+                <p className="text-xs sm:text-sm text-gray-500 dark:text-gray-400">
+                  Click Detect Now to request a fresh capture from ESP32, process it on Render, and show the latest result.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-end">
+              <button
+                type="button"
+                onClick={triggerESPCapture}
+                disabled={detectionsLoading}
+                className="w-full px-5 py-2.5 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-xl font-semibold text-sm transition-all"
+              >
+                {detectionsLoading ? "Requesting ESP capture..." : "Detect Now (ESP)"}
+              </button>
+            </div>
+
+            {captureRequest && (
+              <div className="rounded-xl border border-blue-200 bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:border-blue-800 dark:text-blue-300 px-4 py-3 text-sm">
+                Request {captureRequest._id || captureRequest.id} is {captureStatus || captureRequest.status || "pending"}.
+              </div>
+            )}
+
+            {detectionError && (
+              <div className="rounded-xl border border-red-200 bg-red-50 text-red-700 dark:bg-red-900/20 dark:border-red-800 dark:text-red-300 px-4 py-3 text-sm">
+                {detectionError}
+              </div>
+            )}
+
+            {detectionResult && (
+              <div className="grid grid-cols-1 lg:grid-cols-[220px_1fr] gap-3">
+                <div className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900/40 p-4">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2">Summary</p>
+                  <div className="space-y-2">
+                    <div>
+                      <p className="text-xs text-gray-400 dark:text-gray-500">Detections</p>
+                      <p className="text-2xl font-bold text-gray-900 dark:text-white">{detectionSummary?.count ?? 0}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-400 dark:text-gray-500">Top label</p>
+                      <p className="text-sm font-semibold text-gray-800 dark:text-gray-200 break-words">
+                        {detectionSummary?.firstLabel || "N/A"}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-900/40 p-4 overflow-auto">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-gray-500 dark:text-gray-400 mb-2">Model Response</p>
+                  <pre className="text-xs sm:text-sm text-gray-700 dark:text-gray-200 whitespace-pre-wrap break-words">
+                    {JSON.stringify(detectionResult, null, 2)}
+                  </pre>
+                </div>
+              </div>
+            )}
+            {/* Latest ESP records */}
+            <div className="mt-4">
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-2">ESP Detection History</h3>
+              <div className="space-y-2">
+                {detectionRecords.slice(0,5).map((r) => (
+                  <div key={r._id} className="rounded-xl border border-gray-100 dark:border-gray-700 p-3 bg-white dark:bg-gray-800">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-xs text-gray-400">Time</p>
+                        <p className="font-medium text-sm text-gray-900 dark:text-white">{new Date(r.createdAt).toLocaleString()}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-gray-400">Weight</p>
+                        <p className="font-medium text-sm">{r.rawWeight ?? "-"} kg</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-gray-400">Detected</p>
+                        <p className="font-medium text-sm">{r.detectedCount ?? "-"}</p>
+                      </div>
+                      <div>
+                        <p className="text-xs text-gray-400">Calculated</p>
+                        <p className="font-medium text-sm">{r.calculatedCount ?? "-"}</p>
+                      </div>
+                      <div>
+                        {r.espResponse?.imageUrl ? (
+                          <a href={r.espResponse.imageUrl} target="_blank" rel="noreferrer" className="text-xs text-blue-600">View Image</a>
+                        ) : null}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {detectionRecords.length === 0 && (
+                  <p className="text-xs text-gray-500">No detection records yet. Use "Detect Now (ESP)" to capture.</p>
+                )}
+              </div>
+            </div>
+          </div>
         </section>
 
         {/* ── Stats Cards ── */}

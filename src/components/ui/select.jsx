@@ -15,3 +15,21 @@ export function Select({ value, onValueChange, children, className = "" }) {
 export function SelectItem({ value, children }) {
   return <option value={value}>{children}</option>;
 }
+
+
+// export default function Select({ children, value, onValueChange }) {
+//   return (
+//     <select
+//       value={value}
+//       onChange={(e) => onValueChange(e.target.value)}
+//       className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent bg-white"
+//     >
+//       {children}
+//     </select>
+//   );
+// }
+
+// function SelectItem({ value, children }) {
+//   return <option value={value}>{children}</option>;
+// }
+

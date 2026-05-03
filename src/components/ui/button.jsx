@@ -1,3 +1,43 @@
+// import React from "react";
+// import { motion } from "framer-motion";
+
+// export const Button = ({
+//   children,
+//   onClick,
+//   variant = "default",
+//   size = "md",
+//   className = "",
+//   ...props
+// }) => {
+//   const base =
+//     "rounded-xl font-medium transition-all duration-200 flex items-center justify-center gap-2";
+
+//   const variants = {
+//     default: "bg-indigo-600 text-white hover:bg-indigo-700",
+//     outline: "border border-gray-300 text-gray-700 hover:bg-gray-100",
+//     destructive: "bg-red-600 text-white hover:bg-red-700",
+//   };
+
+//   const sizes = {
+//     sm: "px-3 py-1.5 text-sm",
+//     md: "px-4 py-2 text-base",
+//     lg: "px-5 py-3 text-lg",
+//   };
+
+//   return (
+//     <motion.button
+//       whileTap={{ scale: 0.95 }}
+//       onClick={onClick}
+//       className={`${base} ${variants[variant]} ${sizes[size]} ${className}`}
+//       {...props}
+//     >
+//       {children}
+//     </motion.button>
+//   );
+// };
+
+// Claude
+
 import React from "react";
 
 export function Button({ 
